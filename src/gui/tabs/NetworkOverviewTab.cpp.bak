@@ -1,0 +1,125 @@
+#include "gui/tabs/NetworkOverviewTab.h"
+#include <QGridLayout>
+#include <QPainter>
+#include <QVBoxLayout>
+#include <algorithm>
+#include "core/Logger.h"
+#include "gui/UiTheme.h"
+
+NetworkOverviewTab::NetworkOverviewTab(AppController* app_ctrl, QWidget* parent) : QWidget(parent), app_ctrl_(app_ctrl) {
+    QVBoxLayout* layout = new QVBoxLayout(this);
+    QGridLayout* summary = new QGridLayout();
+    pps_label_ = new QLabel("PPS: 0");
+    bps_label_ = new QLabel("BPS: 0");
+    health_label_ = new QLabel("Health: UNKNOWN");
+    for (QLabel* label : {pps_label_, bps_label_, health_label_}) {
+        label->setMinimumHeight(34);
+        label->setStyleSheet(QString("font-weight: bold; color: %1; padding: 10px; background:%2; border:1px solid %3; border-radius:8px;")
+                                 .arg(UiTheme::kText, UiTheme::kPanel, UiTheme::kBorder));
+    }
+    summary->addWidget(pps_label_, 0, 0);
+    summary->addWidget(bps_label_, 0, 1);
+    summary->addWidget(health_label_, 0, 2);
+    layout->addLayout(summary);
+
+    selected_packet_label_ = new QLabel("Active packet: waiting for stream selection.");
+    selected_packet_label_->setWordWrap(true);
+    selected_packet_label_->setStyleSheet(QString("font-weight:700; color:%1; padding:10px; background:%2; border:1px solid %3; border-radius:8px;")
+                                             .arg(UiTheme::kText, UiTheme::kPanelAlt, UiTheme::kBorder));
+    layout->addWidget(selected_packet_label_);
+
+    pps_series_ = new QLineSeries();
+    bps_series_ = new QLineSeries();
+
+    pps_chart_ = new QChart();
+    pps_chart_->addSeries(pps_series_);
+    pps_chart_->createDefaultAxes();
+    pps_chart_->setTitle("Packets Per Second");
+    pps_chart_->legend()->hide();
+    pps_chart_->setTheme(QChart::ChartThemeDark);
+    pps_chart_->setBackgroundBrush(QColor(UiTheme::kPanel));
+
+    bps_chart_ = new QChart();
+    bps_chart_->addSeries(bps_series_);
+    bps_chart_->createDefaultAxes();
+    bps_chart_->setTitle("Bytes Per Second");
+    bps_chart_->legend()->hide();
+    bps_chart_->setTheme(QChart::ChartThemeDark);
+    bps_chart_->setBackgroundBrush(QColor(UiTheme::kPanel));
+
+    QChartView* pps_view = new QChartView(pps_chart_);
+    QChartView* bps_view = new QChartView(bps_chart_);
+    pps_view->setRenderHint(QPainter::Antialiasing);
+    bps_view->setRenderHint(QPainter::Antialiasing);
+    layout->addWidget(pps_view, 1);
+    layout->addWidget(bps_view, 1);
+    
+    connect(app_ctrl_, &AppController::metricsUpdated, this, &NetworkOverviewTab::onMetricsUpdated);
+    connect(app_ctrl_, &AppController::healthChanged, this, &NetworkOverviewTab::onHealthChanged);
+    connect(app_ctrl_, &AppController::alertTriggered, this, &NetworkOverviewTab::onAlert);
+    connect(app_ctrl_, &AppController::selectedPacketChanged, this, &NetworkOverviewTab::onSelectedPacket);
+}
+
+void NetworkOverviewTab::onMetricsUpdated(NetworkMetrics metrics) {
+    Logger::instance().log(LogLevel::DEBUG, "GUI", "NetworkOverviewTab slot called, updating widget");
+    pps_label_->setText("PPS: " + QString::number(metrics.packets_per_second.load()));
+    bps_label_->setText("BPS: " + QString::number(metrics.bytes_per_second.load()));
+
+    pps_series_->clear();
+    bps_series_->clear();
+    const int pps_start = std::max(0, static_cast<int>(metrics.pps_history.size()) - 120);
+    const int bps_start = std::max(0, static_cast<int>(metrics.bps_history.size()) - 120);
+
+    for (int i = pps_start; i < static_cast<int>(metrics.pps_history.size()); ++i) {
+        pps_series_->append(i - pps_start, static_cast<qreal>(metrics.pps_history[static_cast<size_t>(i)].second));
+    }
+    for (int i = bps_start; i < static_cast<int>(metrics.bps_history.size()); ++i) {
+        bps_series_->append(i - bps_start, static_cast<qreal>(metrics.bps_history[static_cast<size_t>(i)].second));
+    }
+    if (pps_series_->count() == 0) {
+        pps_series_->append(0, 0);
+    }
+    if (bps_series_->count() == 0) {
+        bps_series_->append(0, 0);
+    }
+    pps_chart_->createDefaultAxes();
+    bps_chart_->createDefaultAxes();
+}
+void NetworkOverviewTab::onHealthChanged(SystemHealth health) {
+    Logger::instance().log(LogLevel::DEBUG, "GUI", "NetworkOverviewTab slot called, updating widget");
+    health_label_->setText("Health: " + QString::fromStdString(health.status_message));
+    if (health.overall == HealthStatus::HEALTHY) {
+        health_label_->setStyleSheet(QString("color: %1; font-weight: bold; padding: 10px; background:%2; border:1px solid %3; border-radius:8px;")
+                                         .arg(UiTheme::kGood, UiTheme::kPanel, UiTheme::kBorder));
+    } else if (health.overall == HealthStatus::DEGRADED) {
+        health_label_->setStyleSheet(QString("color: %1; font-weight: bold; padding: 10px; background:%2; border:1px solid %3; border-radius:8px;")
+                                         .arg(UiTheme::kWarn, UiTheme::kPanel, UiTheme::kBorder));
+    } else {
+        health_label_->setStyleSheet(QString("color: %1; font-weight: bold; padding: 10px; background:%2; border:1px solid %3; border-radius:8px;")
+                                         .arg(UiTheme::kBad, UiTheme::kPanel, UiTheme::kBorder));
+    }
+}
+void NetworkOverviewTab::onAlert(Event evt) {
+    Logger::instance().log(LogLevel::DEBUG, "GUI", "NetworkOverviewTab slot called, updating widget");
+    if (evt.type == EventType::ALERT_DNS_FAILURE) {
+        health_label_->setText("Health: DNS ALERT");
+    } else if (evt.type == EventType::ALERT_PACKET_LOSS) {
+        health_label_->setText("Health: PACKET LOSS");
+    } else {
+        health_label_->setText("Health: " + QString::fromStdString(evt.description));
+    }
+    health_label_->setStyleSheet(QString("color: %1; font-weight: bold; padding: 10px; background:%2; border:1px solid %3; border-radius:8px;")
+                                     .arg(UiTheme::kBad, UiTheme::kPanel, UiTheme::kBorder));
+}
+
+void NetworkOverviewTab::onSelectedPacket(UnifiedPacket pkt) {
+    selected_packet_label_->setText(QString("Active packet #%1 | %2 | flow %3 | %4:%5 -> %6:%7 | %8 bytes")
+        .arg(pkt.id)
+        .arg(QString::fromStdString(protocolToString(pkt.protocol)))
+        .arg(pkt.flow_id)
+        .arg(QString::fromStdString(pkt.src_ip))
+        .arg(pkt.src_port)
+        .arg(QString::fromStdString(pkt.dst_ip))
+        .arg(pkt.dst_port)
+        .arg(pkt.packet_size));
+}
